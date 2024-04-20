@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Manage Apps</title>
+    <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline';" />
+
+</head>
+
+<body>
+    <div>
+        <div id="listApps">List Of App</div>
+
+        <div>
+            Name of App: <input id="appName" placeholder="Application name" /><br />
+            Leave this blank if Twitch category is the same as app's name: <input id="category"
+                placeholder="Twitch category" />
+
+        </div>
+        <button id="btn-addName">Add</button>
+        <div id="logs"></div>
+    </div>
+    <script src="./list-renderer.js"></script>
+</body>
+
+</html>
