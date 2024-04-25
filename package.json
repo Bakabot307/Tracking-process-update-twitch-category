@@ -14,7 +14,10 @@
     "axios": "^1.6.8",
     "express": "^4.19.2",
     "fast-csv": "^5.0.1",
+    "node-active-window": "^0.1.0",
     "node-fetch": "^2.7.0",
+    "ps-tree": "^1.2.0",
+    "tree-kill": "^1.2.2",
     "ws": "^8.16.0"
   },
   "devDependencies": {

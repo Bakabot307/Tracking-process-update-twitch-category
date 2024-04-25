@@ -2,15 +2,15 @@
 const appName = document.getElementById('appName')
 const category = document.getElementById('category')
 const btnAddName = document.getElementById('btn-addName')
+
 btnAddName.addEventListener('click', () => {
   const name = appName.value
   const cat = category.value
   window.listApi.addName(name, cat)
 })
 
-
 window.listApi.onLoadSavedList((data) => {
-  if(data.status === 'OK'){
+  if (data.status === 'OK') {
     appName.value = '';
     category.value = '';
   }

@@ -1,0 +1,7 @@
+{
+    "process": {
+        "windowFocus_time": 1,
+        "windowNoFocus_time": 1,
+        "idleCategory": "chatting"
+    }
+}

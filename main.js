@@ -1,131 +1,188 @@
 
-const { app, BrowserWindow, ipcMain,shell } = require('electron/main')
+const { app, BrowserWindow, ipcMain, shell } = require('electron/main')
 const path = require('node:path')
 const fs = require('fs');
-const  {checkTargetProcesses}  = require('./events/Process.js');
-const {openServer} = require('./twitch/functions.js');
+const monitor = require('./events/Process.js');
+const { killServerProcess } = require('./events/Process.js');
+
+const { openServer } = require('./twitch/functions.js');
 const WebSocket = require('ws');
-const {sendLog} = require('./common/Log.js');
+const { sendLog, loadFile, saveFile } = require('./common.js');
 const TwitchClass = require('./twitch/class.js');
+const treeKill = require('tree-kill');
 const clientId = 'qarqfcwzn8owibki0nb0hdc0thwfxb';
 const clientSecret = 'l39js4ios95bjxstrvsans0cb50wi5';
-const jsonFilePath = path.join(__dirname,'datas', 'appName.json');
-const jsonFilePath2 = path.join(__dirname,'datas', 'cookie.json');
+const namePath = path.join(__dirname, 'datas', 'appName.json');
+const cookiePath = path.join(__dirname, 'datas', 'cookie.json');
+const settingsPath = path.join(__dirname, 'datas', 'settings.json');
 let win;
 let listWindow;
 let ws;
 let ws2;
 let username;
-let appRunningInterval;
 let twitch;
-let currentStreamingState = {status: false, category: '', categoryId: ''};
-function createWindow () {
+let currentStreamingState = { status: false, category: '', categoryId: '' };
+let settings;
+let appNames = [];
+let dataTimer1 = null;
+let dataTimer2 = null;
+let lastData = null;
+let allowToUpdate;
+let appRunning;
+let dataListener = null;
+function createWindow() {
   const mainWindow = new BrowserWindow({
-    title: 'Tracking App',  
+    title: 'Tracking App',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js')
     }
   })
-    win = mainWindow;
-    mainWindow.loadFile('index.html')
-    mainWindow.setMenu(null);
-    mainWindow.setMenuBarVisibility(false);
-    mainWindow.webContents.on('did-finish-load', async () => {     
-      sendLog(win,'APP', 'OK', 'Main window finished loading');
-            doStuff();  
-            
-    });    
-  }
-  async function doStuff(){    
+  win = mainWindow;
+  mainWindow.loadFile('index.html')
+  mainWindow.setMenu(null);
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.on('did-finish-load', async () => {
+    sendLog(win, 'APP', 'OK', 'Main window finished loading');
+    //load settings
+    try {
+      await loadFile(settingsPath).then((data) => {
+        settings = data;
+      });
 
-    let twitchData = await TwitchClass.getTwitchToken();
-     if(twitchData===null){
-      sendLog(win,'APP', 'ACTION_REQUIRED_LOGIN', 'No Twitch token found, please login first');
-      return;
-    } else if(twitchData.status === "EXPIRED"){      
-    const newToken = await TwitchClass.refreshAccessToken(twitchData.data, clientId, clientSecret);
-    if(newToken.status === "EXPIRED"){
-      sendLog(win,'APP', 'ACTION_REQUIRED_LOGIN', 'Twitch token is expired, please login again');
-      return;    
+      await loadFile(namePath).then((data) => {
+        appNames = data;
+      });
+    } catch (error) {
+      console.error(error);
     }
-    twitchData = newToken;          
-    } 
-    const accessToken = twitchData.data.tokens.accessToken;
-    twitch = new TwitchClass(accessToken, clientId, clientSecret);
-    const broadcasterId = await twitch.getBroadcasterId(); 
-    
-    username = twitchData.data.username; 
 
-    const streamingInfo = await twitch.getStreamInfo(broadcasterId);
-
-
-
-    if(streamingInfo===null){
-      currentStreamingState.status = false;   
-      currentStreamingState.category = '';
-      currentStreamingState.categoryId = '';     
-      sendLog(win,'WEB', 'INFO', `${username} is not streaming right now`);       
-    } else {
-      currentStreamingState.status = true;
-      currentStreamingState.category = streamingInfo.category;
-      currentStreamingState.categoryId = streamingInfo.categoryId;
-      updateStreamInterval(broadcasterId);
-      sendLog(win,'WEB', 'INFO', `${username} is streaming right now`);
+    doStuff();
+  });
+  mainWindow.on('close', (e) => {
+    if (monitor.serverProcess) {
+      e.preventDefault();
+      treeKill(monitor.serverProcess.pid, 'SIGKILL', function () {
+        console.log('Server process killed');
+        monitor.serverProcess = null;
+        mainWindow.close();
+      });
     }
-    openWebSocketChat(accessToken,username);
-    openWebSocketEvent(accessToken,broadcasterId); 
-  }
-async function updateStreamInterval(broadcasterId){  
-  await updateStreamCategory(broadcasterId);
-
-  appRunningInterval = setInterval( async() => {
-  await updateStreamCategory(broadcasterId)
-}, 50000);
+  });
 }
-let lastRunningApp = null;
 
-async function updateStreamCategory(broadcasterId){ 
-  let updated=false;
-  await checkTargetProcesses( async(runningApp) => {  
-    if(lastRunningApp && runningApp === undefined || currentStreamingState.status === false){
-      lastRunningApp = runningApp;
-      win.webContents.send('load-running-list', runningApp);
-      if(currentStreamingState.status){
-        updated = await twitch.updateStreamCategory(broadcasterId, "");
+
+async function doStuff() {
+  const data = await TwitchClass.getTwitchToken();
+  let twitchData;
+  if (data === null) {
+    sendLog(win, 'APP', 'ACTION_REQUIRED_LOGIN', 'No Twitch token found, please login first');
+    return;
+  } else if (data.status === "EXPIRED") {
+    const newToken = await TwitchClass.refreshAccessToken(twitchData, clientId, clientSecret);
+    if (newToken.status === "EXPIRED") {
+      sendLog(win, 'APP', 'ACTION_REQUIRED_LOGIN', 'Twitch token is expired, please login again');
+      return;
+    }
+    twitchData = newToken ? newToken : data.data;
+  }
+  const accessToken = twitchData.tokens.accessToken;
+  twitch = new TwitchClass(accessToken, clientId, clientSecret);
+  const broadcasterId = await twitch.getBroadcasterId();
+
+  username = data.data.username;
+
+  const streamingInfo = await twitch.getStreamInfo(broadcasterId);
+
+  if (streamingInfo === null) {
+    currentStreamingState.status = false;
+    currentStreamingState.category = '';
+    currentStreamingState.categoryId = '';
+    sendLog(win, 'WEB', 'INFO', `${username} is not streaming right now`);
+  } else {
+    currentStreamingState.status = true;
+    currentStreamingState.category = streamingInfo.category;
+    currentStreamingState.categoryId = streamingInfo.categoryId;
+
+    sendLog(win, 'WEB', 'INFO', `${username} is streaming right now`);
+    updateStreamCategory(broadcasterId);
+  }
+  openWebSocketChat(accessToken, username);
+  openWebSocketEvent(accessToken, broadcasterId);
+}
+
+
+
+async function updateStreamCategory(broadcasterId) {
+  dataListener = async (data) => {
+    const dataString = data.toString().toLowerCase();
+    allowToUpdate = false;
+    console.log('Data:', dataString);
+    if (dataTimer1) {
+      clearTimeout(dataTimer1);
+    }
+
+    if (dataTimer2) {
+      clearTimeout(dataTimer2);
+    }
+    dataTimer1 = setTimeout(async () => {
+      appNames.some((app) => {
+        if (dataString.includes(app.name) && currentStreamingState.categoryId !== app.categoryId) {
+          appRunning = app;
+          allowToUpdate = "FOCUSED";
+          return true;
+        } else {
+          allowToUpdate = "NOT FOCUSED";
+        }
+      });
+
+      if (dataString !== lastData && allowToUpdate === "FOCUSED") {
+        console.log('allowToUpdate:', allowToUpdate);
+        dataTimer2 = setTimeout(async () => {
+          const update = await twitch.updateStreamCategory(broadcasterId, appRunning.categoryId);
+          if (update) {
+            lastData = dataString;
+            console.log('Category updated to:', appRunning.category);
+          } else {
+            console.log('Category not updated');
+          }
+        }, settings.process.windowFocus_time * 1000 * 60); ///after secs will update category if the window is focused
+      } else if (dataString !== lastData && allowToUpdate === "NOT FOCUSED") {
+        if (currentStreamingState.categoryId == 0 || currentStreamingState.categoryId == 509658) {
+          return;
+        }
+        dataTimer2 = setTimeout(async () => {
+          let update;
+          switch (settings.process.idleCategory) {
+            case "chatting":
+              update = await twitch.updateStreamCategory(broadcasterId, 509658);
+              break;
+            case "none":
+              update = await twitch.updateStreamCategory(broadcasterId, 0);
+              break;
+            default:
+              break;
+          }
+          if (update) {
+            lastData = dataString;
+            console.log('Category updated to chatting');
+          } else {
+            console.log('Category not updated');
+          }
+        }, settings.process.windowNoFocus_time * 1000 * 60); ///after secs will update category if the window is focused
       }
-      return;
-    }
+    }, 10000); ///after 10 sec will continue executing the code
+  }
+  monitor.serverProcess.stdout.on('data', dataListener);
+  sendLog(win, 'APP', 'INFO', 'Listening for app names in the window title because the stream is live');
+}
 
-    if (runningApp === undefined) {
-      return;
-    }
-
-    if (lastRunningApp && runningApp.name === lastRunningApp.name) {
-      return;
-    }
-
-    lastRunningApp = runningApp;
-    win.webContents.send('load-running-list', runningApp);
-
-    if(runningApp.categoryId === currentStreamingState.categoryId){
-      console.log('Already streaming with the same category');
-      return;
-    } else {
-      currentStreamingState.categoryId = runningApp.categoryId;
-      currentStreamingState.category = runningApp.category;
-      currentStreamingState.status = true;
-      win.webContents.send('load-running-list', runningApp);       
-    }
-  
-if(currentStreamingState.status){
-       updated = await twitch.updateStreamCategory(broadcasterId, runningApp.categoryId);
-      if(updated){
-        console.log('Stream category updated');
-      } else {
-        console.log('Stream category not updated');
-      }
-    }    
-    })  
+function stopUpdateStreamCategory() {
+  if (dataListener) {
+    monitor.serverProcess.stdout.off('data', dataListener);
+    dataListener = null;
+  }
+  killServerProcess();
+  sendLog(win, 'APP', 'INFO', 'Stopped listening for app names in the window title because the stream is offline');
 }
 
 app.whenReady().then(() => {
@@ -133,12 +190,15 @@ app.whenReady().then(() => {
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })  
+  })
 })
 
 app.on('window-all-closed', function () {
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
 })
+
 
 let newWindow;
 ipcMain.on('action', (event, action) => {
@@ -150,22 +210,18 @@ ipcMain.on('action', (event, action) => {
         width: 800,
         height: 600
       });
-      
+
       newWindow.loadURL("http://localhost:3000/auth");
-     
+
       newWindow.webContents.on('did-finish-load', () => {
-        newWindow.webContents.session.cookies.get({ name: 'auth-token' }).then((cookies) => {
+        newWindow.webContents.session.cookies.get({ name: 'auth-token' }).then(async (cookies) => {
           if (cookies.length > 0) {
             const loginToken = {
               name: cookies[0].name,
               value: cookies[0].value,
               expires: cookies[0].expirationDate
             };
-            fs.writeFile(jsonFilePath2, JSON.stringify(loginToken, null, 2), (err) => {
-              if(err){
-                console.error(`Error writing file to disk: ${err.message}`);
-              }
-            });
+            await saveFile(cookiePath, loginToken, event);
           } else {
             console.log('No auth-token cookie found');
           }
@@ -186,51 +242,44 @@ ipcMain.on('action', (event, action) => {
   }
 
 });
-function openListWindow(){
- listWindow = new BrowserWindow({
+
+function openListWindow() {
+  listWindow = new BrowserWindow({
     title: 'Manage apps',
     width: 400,
     height: 300,
     webPreferences: {
       preload: path.join(__dirname, './list/list-preload.js')
     }
-  }) 
+  })
   listWindow.setMenu(null);
   listWindow.setMenuBarVisibility(false);
   listWindow.loadFile('./list/list.html')
-  listWindow.webContents.on('did-finish-load', async () => {     
-   sendLog(listWindow,'APP', 'OK', 'List window finished loading');
-  fs.readFile(jsonFilePath, 'utf8', (err, data) => {
-    if (err) {
-      console.error(`Error reading file from disk: ${err.message}`);
-    } else {
-      const appNames = JSON.parse(data);
-      listWindow.webContents.send('load-saved-list',{message: "OK", data:appNames} );
-    }
-  });
+  listWindow.webContents.on('did-finish-load', async () => {
+    sendLog(listWindow, 'APP', 'OK', 'List window finished loading');
+    listWindow.webContents.send('load-saved-list', { message: "OK", data: appNames });
   });
 
-  listWindow.on('close', () => {    
-    sendLog(win,'APP', 'INFO', 'List window closed');
+  listWindow.on('close', () => {
+    sendLog(win, 'APP', 'INFO', 'List window closed');
   });
 }
 
-
-function openWebSocketChat(accessToken,username){
+function openWebSocketChat(accessToken, username) {
   ws2 = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
 
-  ws2.on('open', () =>{
-    sendLog(win,'WEB','OK', 'WebSocket CHAT connection opened' );
+  ws2.on('open', () => {
+    sendLog(win, 'WEB', 'OK', 'WebSocket CHAT connection opened');
     ws2.send('CAP REQ :twitch.tv/membership twitch.tv/tags twitch.tv/commands');
     ws2.send(`PASS oauth:${accessToken}`);
     ws2.send(`NICK #${username}`);
-    ws2.send(`JOIN #${username}`);  
+    ws2.send(`JOIN #${username}`);
   });
-  
-  ws2.on('message',  (data) =>{
+
+  ws2.on('message', (data) => {
     const message = data.toString();
     console.log('Received message:', message);
-  
+
     const badgeMatch = message.match(/badges=([^;]*)/);
     const badges = badgeMatch ? badgeMatch[1] : 'No badges';
     console.log('Badges:', badges);
@@ -243,118 +292,104 @@ function openWebSocketChat(accessToken,username){
       console.log('Text:', text);
     }
   });
-  
-ws2.on('error', (err) => {
-  console.error('WebSocket error:', err);
-});
+
+  ws2.on('error', (err) => {
+    console.error('WebSocket error:', err);
+  });
 }
 
-ipcMain.on('btn-addName', (event, name, category) => {
-  if(category === '' || category === undefined || category === null){
+ipcMain.on('btn-addName', async (event, name, category) => {
+  if (category === '' || category === undefined || category === null) {
     category = name;
   }
-  fs.readFile(jsonFilePath, 'utf8',async (err, data) => {
-    if (err) {
-      sendLog(win,'APP', 'FAILED', `Error reading file from disk when adding name ${name}: ${err.message}`)
-    } else {
-      const appNames = JSON.parse(data);
-      let newName = name.toLowerCase();
-      category = category.toLowerCase();
-      for (const appName of appNames) {
-        if (appName.name === newName) {     
-          sendLog(listWindow,'APP', 'FAILED', `Name already exists ${newName}`);     
-          return;
-        }
-      }
-      const gameId = await twitch.getGameId(category);
-
-      if(gameId === null){
-        sendLog(listWindow,'APP', 'FAILED', `Category isn't exist ${newName}, please check the game name`);
-        return;
-      }
-      appNames.push({name: newName, category: category, categoryId: gameId});
-      saveListData(appNames,`added ${newName}`,event, "OK");
-      sendLog(listWindow,'APP', 'CREATED', `Added ${newName}`);
-      sendLog(win,'APP', 'CREATED', `Added ${newName}`)
+  let newName = name.toLowerCase();
+  category = category.toLowerCase();
+  for (const appName of appNames) {
+    if (appName.name === newName) {
+      sendLog(listWindow, 'APP', 'FAILED', `Name already exists ${newName}`);
+      return;
     }
-  });
+  }
+  const gameId = await twitch.getGameId(category);
+
+  if (gameId === null) {
+    sendLog(listWindow, 'APP', 'FAILED', `Category isn't exist ${newName}, please check the game name`);
+    return;
+  }
+  appNames.push({ name: newName, category: category, categoryId: gameId });
+
+  const saved = await saveFile(namePath, appNames, event);
+  if (saved) {
+    sendLog(listWindow, 'APP', 'CREATED', `Added ${newName}`);
+    sendLog(win, 'APP', 'CREATED', `Added ${newName}`)
+  }
 });
 
-ipcMain.on('btn-deleteName', (event, value) => {
-  fs.readFile(jsonFilePath, 'utf8', (err, data) => {
-    if (err) {
-      sendLog(win,'APP', 'FAILED', `Error reading file from disk when deleting name ${value}: ${err.message}`)
-    } else {
-      let appNames = JSON.parse(data);
-      appNames = appNames.filter(appName => appName.name !== value);   
-      saveListData(appNames,`Deleted ${value}`,event,"OK");
-      sendLog(win,'APP', 'DELETED', `Deleted ${value}`);
-    }    
-  });
+ipcMain.on('btn-deleteName', async (event, value) => {
+  appNames = appNames.filter(data => data.name !== value);
+  const saved = await saveFile(namePath, appNames, event);
+  if (saved) {
+    sendLog(win, 'APP', 'DELETED', `Deleted ${value}`);
+    sendLog(listWindow, 'APP', 'DELETED', `Deleted ${value}`);
+  }
 });
 
-ipcMain.on('save-list', (event,data) => {  
-  saveListData(data,'saved',event);
+ipcMain.on('save-list', async (event, data) => {
+  const saved = await saveFile(namePath, data, event);
+  if (saved) {
+    appNames = data;
+  }
 });
-
-function saveListData(list, message, event, status) {
-  fs.writeFile(jsonFilePath, JSON.stringify(list, null, 2), 'utf8', (err) => {
-    if (err) {
-      console.error(`Error writing file to disk: ${err.message}`);
-    } else {
-      event.sender.send('load-saved-list',{status: status ,message: message, data: list});
-    }
-  });
-}
 
 //open websocket for eventsub 
-function openWebSocketEvent(accessToken,broadcasterId) {
+function openWebSocketEvent(accessToken, broadcasterId) {
   ws = new WebSocket('wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30');
   ws.on('open', function open() {
-    sendLog(win,'WEB','OK', 'WebSocket EVENTSUB connection opened' );
+    sendLog(win, 'WEB', 'OK', 'WebSocket EVENTSUB connection opened');
   });
-  ws.on('message', async(event) => {
+  ws.on('message', async (event) => {
     const data = JSON.parse(event);
     const metadata = data.metadata;
     const payload = data.payload;
-    if (metadata.message_type === 'session_welcome') {     
+    if (metadata.message_type === 'session_welcome') {
       createEventSubSubscription(payload.session.id, accessToken, broadcasterId);
-    } 
-
-    if(metadata.subscription_type==='stream.online' && payload.subscription.type === 'stream.online'){
-      sendLog(win,'STREAMING', 'INFO', `${username} went live at ${payload.event.started_at}`);
-      currentStreamingState.status = true;    
+    }
+    if (metadata.subscription_type === 'stream.online' && payload.subscription.type === 'stream.online') {
+      sendLog(win, 'STREAMING', 'INFO', `${username} went live at ${payload.event.started_at}`);
+      currentStreamingState.status = true;
+      updateStreamCategory(broadcasterId);
+    }
+    if (metadata.subscription_type === 'stream.offline' && payload.subscription.type === 'stream.offline') {
+      sendLog(win, 'STREAMING', 'INFO', `${username} went offline at ${payload.subscription.created_at}`);
+      currentStreamingState.status = false;
+      stopUpdateStreamCategory();
     }
 
-    if(metadata.subscription_type==='stream.offline' && payload.subscription.type === 'stream.offline'){
-      sendLog(win,'STREAMING', 'INFO', `${username} went offline at ${payload.subscription.created_at}`);
-      currentStreamingState.status = false;    
-    }
- 
-    if(metadata.subscription_type==='channel.update' && payload.subscription.type === 'channel.update'){
+    if (metadata.subscription_type === 'channel.update' && payload.subscription.type === 'channel.update') {
       console.log('Stream info got updated, current category:', payload.event.category_name);
-      sendLog(win,'STREAMING', 'INFO', `Stream info got updated, current category: ${payload.event.category_name}`); 
+      currentStreamingState.category = payload.event.category_name;
+      currentStreamingState.categoryId = payload.event.category_id;
+      sendLog(win, 'STREAMING', 'INFO', `Stream info got updated, current category: ${payload.event.category_name}`);
     }
   });
 
-  ws.on('error', (err) =>{
+  ws.on('error', (err) => {
     console.error('WebSocket error:', err);
   });
 
-  ws.on('close', (code, reason) =>{
+  ws.on('close', (code, reason) => {
     console.log('WebSocket connection closed:', code, reason.toString());
   });
 
 }
 
-
- function closeWebSocket() {
+function closeWebSocket() {
   if (ws) {
     ws.close();
   }
 }
 
-const createEventSubSubscription = async (sessionID,accessToken,broadcasterId) => {
+const createEventSubSubscription = async (sessionID, accessToken, broadcasterId) => {
   const types = [
     { name: 'stream.online', version: '1' },
     { name: 'stream.offline', version: '1' },
@@ -372,7 +407,7 @@ const createEventSubSubscription = async (sessionID,accessToken,broadcasterId) =
       "type": type.name,
       "version": type.version,
       "condition": {
-          "broadcaster_user_id": broadcasterId
+        "broadcaster_user_id": broadcasterId
       },
       "transport": {
         "method": 'websocket',
@@ -381,11 +416,11 @@ const createEventSubSubscription = async (sessionID,accessToken,broadcasterId) =
     });
 
     const response = await fetch(url, { method: 'POST', headers, body });
-    if(response.status === 202){
-      sendLog(win,'WEB', 'OK', `EventSub subscription created for type: ${type.name}` );
+    if (response.status === 202) {
+      sendLog(win, 'WEB', 'OK', `EventSub subscription created for type: ${type.name}`);
     } else {
       console.log('Error creating EventSub subscription:', response);
-      sendLog(win,'WEB', 'FAILED', `Error creating EventSub subscription for type: ${type.name}` );
-    }   
+      sendLog(win, 'WEB', 'FAILED', `Error creating EventSub subscription for type: ${type.name}`);
+    }
   }
 };

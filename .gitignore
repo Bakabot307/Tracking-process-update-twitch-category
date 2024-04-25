@@ -2,3 +2,4 @@ node_modules/
 .vscode/
 package-lock.json
 build/
+Tracker-win32-x64/

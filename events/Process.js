@@ -1,43 +1,32 @@
-const { exec } = require('child_process');
-const csv = require('fast-csv');
-const fs = require('fs');
 const path = require('path');
-const jsonFilePath = path.join(__dirname,'..', '/datas/AppName.json');
+const { spawn } = require('child_process');
+const kill = require('tree-kill');
+const psTree = require('ps-tree');
 
+const pathName = path.join(__dirname, 'app/bin');
 
-async function checkTargetProcesses(callback) {
-  const targetProcesses = JSON.parse(fs.readFileSync(jsonFilePath, 'utf8'));
-  try {
-    const { stdout } = await new Promise((resolve, reject) => {
-      exec('tasklist /FO CSV ', (err, stdout, stderr) => {
+const serverProcess = spawn('cmd.exe', ['/c', 'app.bat'], {
+    detached: false,
+    cwd: pathName,
+    windowsHide: true,
+});
+
+console.log('Server process started:', serverProcess.pid);
+serverProcess.on('exit', (code) => {
+    console.log(`Child exited with code ${code}`);
+    console.log('Server process killed', serverProcess.killed);
+});
+
+exports.serverProcess = serverProcess
+exports.killServerProcess = function (mainWindow) {
+    kill(serverProcess.pid, 'SIGTERM', function (err) {
         if (err) {
-          reject(err);
-          return;
+            console.error(err);
         }
-        resolve({ stdout, stderr });
-      });
+        console.log('Server process killed');
+        serverProcess = null;
     });
-    let firstApp;;
-    csv.parseString(stdout, { headers: true })
-      .on('data', row => {
-        const imageName = row['Image Name'].toLowerCase().replace('.exe', '');
-        if(!firstApp){        
-        firstApp = targetProcesses.find(x => x.name.replace(" ","").includes(imageName));
-        }  
-  })
-      .on('end', () => {
-        callback(firstApp);
-      })
-      .on('error', (error) => {
-        console.error(error);
-      });
-
-  } catch (error) {
-    console.error(error);
-  }
-  
-}
-
-module.exports = {
-  checkTargetProcesses
 };
+
+
+
